@@ -1,0 +1,6 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# React Native 生态里仍有部分库不兼容 pnpm 默认的隔离安装，统一用 hoisted 更稳。
+nodeLinker: hoisted

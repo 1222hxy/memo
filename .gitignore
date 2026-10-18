@@ -1,0 +1,15 @@
+node_modules/
+.DS_Store
+*.tsbuildinfo
+coverage/
+
+# 本地环境变量与签名材料，永远不要提交（仓库是公开的）
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.key
+*.pem
+*.mobileprovision
+*.cer

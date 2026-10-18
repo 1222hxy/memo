@@ -1,0 +1,27 @@
+{
+  "name": "@memo/mobile",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@memo/core": "workspace:*",
+    "expo": "~58.0.14",
+    "expo-crypto": "~58.0.7",
+    "expo-dev-client": "~58.0.14",
+    "expo-haptics": "~58.0.7",
+    "expo-status-bar": "~58.0.3",
+    "react": "19.3.0",
+    "react-native": "0.88.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.3.0",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "typecheck": "tsc --noEmit",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}
