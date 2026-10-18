@@ -22,6 +22,15 @@ pnpm typecheck
 pnpm mobile      # 启动 Metro，手机上的开发版通过局域网连接并热更新
 ```
 
+## 云同步（Supabase）
+
+1. 新建 Supabase 项目，在 SQL Editor 里执行 `supabase/migrations/0001_init.sql`。
+2. Authentication → Sign In / Providers → Email：关掉 Confirm email（App 用邮箱 + 密码登录，不发邮件）。
+3. 把 `apps/mobile/.env.example` 复制成 `apps/mobile/.env`，填上 Project URL 和 publishable key，重启 `pnpm mobile`。
+
+同步逻辑在 `apps/mobile/src/sync`：本地改动由触发器记进待上传队列，按行上传；按服务器时间增量拉取，
+Realtime 通知其他设备；可修改的数据「后写的赢」，复习记录和事件只追加。
+
 ## 编译 iOS
 
 在 GitHub 仓库的 Settings → Secrets and variables → Actions 中配置：

@@ -40,6 +40,7 @@ import { DEVICE, TIMEZONE } from './device';
 import { LibrarySheet } from './LibrarySheet';
 import { RatingSlider } from './RatingSlider';
 import { SettingsSheet, type Preferences } from './SettingsSheet';
+import { useSync } from './sync/SyncProvider';
 import { useColors } from './theme';
 
 type Screen = 'loading' | 'question' | 'answer' | 'pause' | 'rest' | 'empty';
@@ -50,6 +51,7 @@ export function ReviewScreen() {
   const db = useSQLiteContext();
   const { c, dark } = useColors();
   const insets = useSafeAreaInsets();
+  const sync = useSync();
 
   const scheduler = useRef(new Scheduler({ mode: DEFAULT_PREFS.reviewMode }));
   const memories = useRef<Memory[]>([]);
@@ -151,7 +153,7 @@ export function ReviewScreen() {
           scopeFolderId: scopeId.current,
           pickKind: ahead.current ? 'ahead' : pick.kind,
           entry: 'app',
-          offline: true,
+          offline: !sync.session || sync.status?.state === 'error',
           shownAt: shownAt.current,
           revealedAt: revealedAt.current,
           ratedAt: now,
@@ -184,7 +186,7 @@ export function ReviewScreen() {
         await show(next);
       }
     },
-    [current, pick, content, db, ctx, show, pool],
+    [current, pick, content, db, ctx, show, pool, sync.session, sync.status?.state],
   );
 
   const keepGoing = async () => {
@@ -226,6 +228,15 @@ export function ReviewScreen() {
     await recordEvent(db, { type: 'scope_changed', folderId }, DEVICE);
     await reload();
   };
+
+  // 其他设备的改动同步过来后，重新读取数据。
+  const firstVersion = useRef(sync.version);
+  useEffect(() => {
+    if (sync.version === firstVersion.current || screen === 'loading') return;
+    firstVersion.current = sync.version;
+    reload().then(refreshCurrent);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.version]);
 
   const closeLibrary = async () => {
     setLibraryOpen(false);

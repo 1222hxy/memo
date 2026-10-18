@@ -19,6 +19,7 @@ import {
 } from './db/repo';
 import { DEVICE } from './device';
 import { FolderPicker, ROOT } from './FolderPicker';
+import { useSync } from './sync/SyncProvider';
 import type { Colors } from './theme';
 
 interface Props {
@@ -34,6 +35,7 @@ type Row = { kind: 'folder'; folder: Folder } | { kind: 'card'; card: CardSummar
 
 export function LibrarySheet({ c, scope, onScope, onClose }: Props) {
   const db = useSQLiteContext();
+  const { version } = useSync();
   const [folders, setFolders] = useState<Folder[]>([]);
   const [path, setPath] = useState<string[]>([]);
   const [cards, setCards] = useState<CardSummary[]>([]);
@@ -51,7 +53,7 @@ export function LibrarySheet({ c, scope, onScope, onClose }: Props) {
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+  }, [refresh, version]);
 
   const touched = async () => {
     changed.current = true;

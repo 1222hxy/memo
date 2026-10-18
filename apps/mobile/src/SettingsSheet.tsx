@@ -2,8 +2,9 @@
  * 设置：自评方式（每台设备各自的）和复习模式。
  */
 import { MODES, type ReviewMode, type SliderMode } from '@memo/core';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { AccountSection } from './AccountSection';
 import type { Colors } from './theme';
 
 export interface Preferences {
@@ -46,7 +47,8 @@ export function SettingsSheet({ prefs, c, onChange, onClose }: Props) {
         </Pressable>
       </View>
 
-      <View style={styles.body}>
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+        <AccountSection c={c} />
         <Group
           title="自评方式"
           footer="只影响这台设备。"
@@ -63,7 +65,7 @@ export function SettingsSheet({ prefs, c, onChange, onClose }: Props) {
           c={c}
           onSelect={(reviewMode) => onChange({ reviewMode })}
         />
-      </View>
+      </ScrollView>
     </View>
   );
 }

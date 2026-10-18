@@ -193,7 +193,7 @@ export async function deleteFolder(db: SQLiteDatabase, id: string, device: Devic
     `select (select count(*) from folders where parent_id = ? and deleted_at is null)
           + (select count(*) from cards where folder_id = ? and deleted_at is null)
           + (select count(*) from card_links l join cards c on c.id = l.card_id
-             where l.folder_id = ? and c.deleted_at is null) as n`,
+             where l.folder_id = ? and l.deleted_at is null and c.deleted_at is null) as n`,
     [id, id, id],
   );
   if ((row?.n ?? 0) > 0) return false;
@@ -212,16 +212,18 @@ export async function loadPlacements(db: SQLiteDatabase): Promise<CardPlacement[
   const cards = await db.getAllAsync<{ id: string; folder_id: string }>(
     'select id, folder_id from cards where deleted_at is null',
   );
-  const links = await db.getAllAsync<{ card_id: string; folder_id: string }>('select card_id, folder_id from card_links');
+  const links = await db.getAllAsync<{ card_id: string; folder_id: string }>(
+    'select card_id, folder_id from card_links where deleted_at is null',
+  );
   const linked = new Map<string, string[]>();
-  for (const l of links) linked.set(l.card_id, [...(linked.get(l.card_id) ?? []), l.folder_id]);
+  for (const l of links) linked.set(l.card_id, [...new Set([...(linked.get(l.card_id) ?? []), l.folder_id])]);
   return cards.map((c) => ({ cardId: c.id, folderId: c.folder_id, linkedFolderIds: linked.get(c.id) ?? [] }));
 }
 
 export async function loadPlacement(db: SQLiteDatabase, cardId: string): Promise<CardPlacement | null> {
   const card = await db.getFirstAsync<{ folder_id: string }>('select folder_id from cards where id = ?', [cardId]);
   if (!card) return null;
-  const links = await db.getAllAsync<{ folder_id: string }>('select folder_id from card_links where card_id = ?', [
+  const links = await db.getAllAsync<{ folder_id: string }>('select distinct folder_id from card_links where card_id = ? and deleted_at is null', [
     cardId,
   ]);
   return { cardId, folderId: card.folder_id, linkedFolderIds: links.map((l) => l.folder_id) };
@@ -239,14 +241,25 @@ export async function setPlacement(
   const now = Date.now();
   await db.withTransactionAsync(async () => {
     await db.runAsync('update cards set folder_id = ?, updated_at = ? where id = ?', [folderId, now, cardId]);
-    await db.runAsync('delete from card_links where card_id = ?', [cardId]);
+    // 关联只做软删除，删除才能同步到其他设备。
+    const existing = await db.getAllAsync<{ id: string; folder_id: string; deleted_at: number | null }>(
+      'select id, folder_id, deleted_at from card_links where card_id = ?',
+      [cardId],
+    );
+    for (const l of existing) {
+      const keep = links.includes(l.folder_id);
+      if (keep && l.deleted_at !== null) {
+        await db.runAsync('update card_links set deleted_at = null, updated_at = ? where id = ?', [now, l.id]);
+      } else if (!keep && l.deleted_at === null) {
+        await db.runAsync('update card_links set deleted_at = ?, updated_at = ? where id = ?', [now, now, l.id]);
+      }
+    }
     for (const f of links) {
-      await db.runAsync('insert into card_links (id, card_id, folder_id, created_at) values (?, ?, ?, ?)', [
-        newId(),
-        cardId,
-        f,
-        now,
-      ]);
+      if (existing.some((l) => l.folder_id === f)) continue;
+      await db.runAsync(
+        'insert into card_links (id, card_id, folder_id, created_at, updated_at) values (?, ?, ?, ?, ?)',
+        [newId(), cardId, f, now, now],
+      );
     }
     await recordEvent(db, { type: 'card_placed', cardId, folderId, linkedFolderIds: links }, device);
   });
@@ -267,7 +280,7 @@ export async function listFolderCards(db: SQLiteDatabase, folderId: string): Pro
             (select content from blocks b where b.card_id = c.id order by sort_key limit 1) as preview
      from cards c
      where c.deleted_at is null
-       and (c.folder_id = ? or exists (select 1 from card_links l where l.card_id = c.id and l.folder_id = ?))
+       and (c.folder_id = ? or exists (select 1 from card_links l where l.card_id = c.id and l.folder_id = ? and l.deleted_at is null))
      order by c.created_at desc`,
     [folderId, folderId, folderId],
   );
@@ -384,8 +397,8 @@ async function insertMemory(db: SQLiteDatabase, m: Memory): Promise<void> {
   const s = m.state;
   await db.runAsync(
     `insert into memories (id, card_id, masks, phase, difficulty, stability, due, last_review, reps, lapses,
-       learning_steps, scheduled_days, introduced_at, created_at)
-     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       learning_steps, scheduled_days, introduced_at, created_at, updated_at)
+     values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       m.id,
       m.cardId,
@@ -400,6 +413,7 @@ async function insertMemory(db: SQLiteDatabase, m: Memory): Promise<void> {
       s.learningSteps,
       s.scheduledDays,
       m.introducedAt,
+      m.createdAt,
       m.createdAt,
     ],
   );
@@ -420,7 +434,8 @@ export async function recordReview(db: SQLiteDatabase, log: ReviewLogRecord, int
   await db.withTransactionAsync(async () => {
     await db.runAsync(
       `update memories set phase = ?, difficulty = ?, stability = ?, due = ?, last_review = ?, reps = ?, lapses = ?,
-         learning_steps = ?, scheduled_days = ?, introduced_at = coalesce(introduced_at, ?)
+         learning_steps = ?, scheduled_days = ?, introduced_at = coalesce(introduced_at, ?),
+         updated_at = ?
        where id = ?`,
       [
         s.phase,
@@ -433,6 +448,7 @@ export async function recordReview(db: SQLiteDatabase, log: ReviewLogRecord, int
         s.learningSteps,
         s.scheduledDays,
         introducedAt,
+        log.reviewedAt,
         log.memoryId,
       ],
     );
