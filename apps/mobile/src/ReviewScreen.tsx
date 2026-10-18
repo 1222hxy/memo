@@ -3,6 +3,7 @@
  */
 import {
   buildReviewLog,
+  cardsInScope,
   DEFAULT_MODE,
   pickAhead,
   pickNext,
@@ -25,7 +26,9 @@ import { CardView } from './CardView';
 import {
   getSetting,
   loadCard,
+  loadFolders,
   loadMemories,
+  loadPlacements,
   loadSession,
   recordEvent,
   recordReview,
@@ -34,6 +37,7 @@ import {
   type SessionState,
 } from './db/repo';
 import { DEVICE, TIMEZONE } from './device';
+import { LibrarySheet } from './LibrarySheet';
 import { RatingSlider } from './RatingSlider';
 import { SettingsSheet, type Preferences } from './SettingsSheet';
 import { useColors } from './theme';
@@ -54,6 +58,8 @@ export function ReviewScreen() {
   const shownAt = useRef(0);
   const revealedAt = useRef(0);
   const ahead = useRef(false);
+  /** 复习范围内的卡片；null = 全部。 */
+  const scopeCards = useRef<Set<string> | null>(null);
 
   const [screen, setScreen] = useState<Screen>('loading');
   const [pick, setPick] = useState<Pick | null>(null);
@@ -61,12 +67,20 @@ export function ReviewScreen() {
   const [editor, setEditor] = useState<{ cardId?: string } | null>(null);
   const [prefs, setPrefs] = useState<Preferences>(DEFAULT_PREFS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [scope, setScope] = useState<{ id: string; name: string } | null>(null);
+  const scopeId = useRef<string | null>(null);
 
   const ctx = useCallback(
     (now = Date.now()): SelectionContext => ({ now, scheduler: scheduler.current, ...session.current }),
     [],
   );
   const current = pick ? memories.current.find((m) => m.id === pick.memoryId) : undefined;
+  /** 当前复习范围内的记忆。 */
+  const pool = useCallback(
+    () => (scopeCards.current ? memories.current.filter((m) => scopeCards.current!.has(m.cardId)) : memories.current),
+    [],
+  );
 
   const show = useCallback(
     async (next: Pick | null) => {
@@ -83,6 +97,11 @@ export function ReviewScreen() {
   const reload = useCallback(async () => {
     memories.current = await loadMemories(db);
     session.current = await loadSession(db, Date.now());
+    const folders = await loadFolders(db);
+    const folder = scopeId.current ? folders.find((f) => f.id === scopeId.current) : undefined;
+    if (!folder) scopeId.current = null;
+    scopeCards.current = cardsInScope(folders, await loadPlacements(db), scopeId.current);
+    setScope(folder ? { id: folder.id, name: folder.name } : null);
   }, [db]);
 
   useEffect(() => {
@@ -93,11 +112,12 @@ export function ReviewScreen() {
         reviewMode: await getSetting(db, 'reviewMode', DEFAULT_PREFS.reviewMode),
       };
       scheduler.current = new Scheduler({ mode: loaded.reviewMode });
+      scopeId.current = await getSetting<string | null>(db, 'scopeFolderId', null);
       setPrefs(loaded);
       await reload();
-      await show(pickNext(memories.current, ctx()));
+      await show(pickNext(pool(), ctx()));
     })();
-  }, [db, reload, show, ctx]);
+  }, [db, reload, show, ctx, pool]);
 
   const changePrefs = async (next: Partial<Preferences>) => {
     setPrefs((p) => ({ ...p, ...next }));
@@ -108,7 +128,7 @@ export function ReviewScreen() {
   const closeSettings = async () => {
     setSettingsOpen(false);
     // 换了复习模式后，空闲页面可能已经有该复习的内容了。
-    if (screen === 'empty') await show(pickNext(memories.current, ctx()));
+    if (screen === 'empty') await show(pickNext(pool(), ctx()));
   };
 
   const reveal = () => {
@@ -128,7 +148,7 @@ export function ReviewScreen() {
           cardVersion: content.card.version,
           device: DEVICE,
           timezone: TIMEZONE,
-          scopeFolderId: null,
+          scopeFolderId: scopeId.current,
           pickKind: ahead.current ? 'ahead' : pick.kind,
           entry: 'app',
           offline: true,
@@ -155,7 +175,7 @@ export function ReviewScreen() {
       };
       segment.current += 1;
 
-      const next = pickNext(memories.current, ctx(now));
+      const next = pickNext(pool(), ctx(now));
       if (shouldOfferPause(segment.current, next !== null)) {
         await recordEvent(db, { type: 'segment_end', reviewed: segment.current }, DEVICE);
         setPick(next);
@@ -164,13 +184,13 @@ export function ReviewScreen() {
         await show(next);
       }
     },
-    [current, pick, content, db, ctx, show],
+    [current, pick, content, db, ctx, show, pool],
   );
 
   const keepGoing = async () => {
     await recordEvent(db, { type: 'pause_choice', choice: 'continue' }, DEVICE);
     segment.current = 0;
-    await show(pickNext(memories.current, ctx()));
+    await show(pickNext(pool(), ctx()));
   };
 
   const stop = async () => {
@@ -180,19 +200,37 @@ export function ReviewScreen() {
 
   const reviewAhead = async () => {
     ahead.current = true;
-    await show(pickAhead(memories.current, ctx()));
+    await show(pickAhead(pool(), ctx()));
   };
 
   const closeEditor = async (changed: boolean) => {
     setEditor(null);
     if (!changed) return;
     await reload();
-    const stillThere = pick && memories.current.some((m) => m.id === pick.memoryId);
+    await refreshCurrent();
+  };
+
+  /** 数据或范围变了：当前题还在范围内就留着（内容可能被改过），否则换下一题。 */
+  const refreshCurrent = async () => {
+    const stillThere = pick && pool().some((m) => m.id === pick.memoryId);
     if ((screen === 'question' || screen === 'answer') && stillThere && current) {
       setContent(await loadCard(db, current.cardId));
     } else if (screen !== 'rest' && screen !== 'pause') {
-      await show(pickNext(memories.current, ctx()));
+      await show(pickNext(pool(), ctx()));
     }
+  };
+
+  const changeScope = async (folderId: string | null) => {
+    scopeId.current = folderId;
+    await setSetting(db, 'scopeFolderId', folderId, DEVICE);
+    await recordEvent(db, { type: 'scope_changed', folderId }, DEVICE);
+    await reload();
+  };
+
+  const closeLibrary = async () => {
+    setLibraryOpen(false);
+    await reload();
+    await refreshCurrent();
   };
 
   return (
@@ -200,9 +238,14 @@ export function ReviewScreen() {
       <StatusBar style={dark ? 'light' : 'dark'} />
 
       <View style={styles.top}>
-        <Pressable hitSlop={12} onPress={() => setSettingsOpen(true)}>
-          <Text style={[styles.corner, { color: c.quiet }]}>设置</Text>
-        </Pressable>
+        <View style={styles.topLeft}>
+          <Pressable hitSlop={12} onPress={() => setLibraryOpen(true)}>
+            <Text style={[styles.corner, { color: c.quiet }]}>卡片库</Text>
+          </Pressable>
+          <Pressable hitSlop={12} onPress={() => setSettingsOpen(true)}>
+            <Text style={[styles.corner, { color: c.quiet }]}>设置</Text>
+          </Pressable>
+        </View>
         <View style={styles.topRight}>
           {screen === 'answer' && content && (
             <Pressable hitSlop={12} onPress={() => setEditor({ cardId: content.card.id })}>
@@ -214,6 +257,14 @@ export function ReviewScreen() {
           </Pressable>
         </View>
       </View>
+
+      {scope && (
+        <Pressable style={styles.scope} hitSlop={8} onPress={() => changeScope(null).then(refreshCurrent)}>
+          <Text style={[styles.scopeText, { color: c.accent }]} numberOfLines={1}>
+            只复习「{scope.name}」 ×
+          </Text>
+        </Pressable>
+      )}
 
       {(screen === 'question' || screen === 'answer') && content && current && (
         <Pressable style={styles.card} onPress={screen === 'question' ? reveal : undefined}>
@@ -257,9 +308,9 @@ export function ReviewScreen() {
 
       {screen === 'empty' && (
         <View style={styles.card}>
-          {memories.current.length === 0 ? (
+          {pool().length === 0 ? (
             <>
-              <Text style={[styles.hint, { color: c.quiet }]}>还没有卡片。</Text>
+              <Text style={[styles.hint, { color: c.quiet }]}>{scope ? '这个文件夹里还没有卡片。' : '还没有卡片。'}</Text>
               <Pressable onPress={() => setEditor({})}>
                 <Text style={[styles.link, { color: c.ink }]}>写第一张</Text>
               </Pressable>
@@ -284,6 +335,10 @@ export function ReviewScreen() {
         {editor && <CardEditor cardId={editor.cardId} c={c} onClose={closeEditor} />}
       </Modal>
 
+      <Modal visible={libraryOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={closeLibrary}>
+        <LibrarySheet c={c} scope={scope?.id ?? null} onScope={changeScope} onClose={closeLibrary} />
+      </Modal>
+
       <Modal visible={settingsOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={closeSettings}>
         <SettingsSheet prefs={prefs} c={c} onChange={changePrefs} onClose={closeSettings} />
       </Modal>
@@ -294,6 +349,9 @@ export function ReviewScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1, paddingHorizontal: 24 },
   top: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', height: 48 },
+  topLeft: { flexDirection: 'row', alignItems: 'center', gap: 20 },
+  scope: { alignSelf: 'flex-start', paddingVertical: 4 },
+  scopeText: { fontSize: 14 },
   topRight: { flexDirection: 'row', alignItems: 'center', gap: 20 },
   corner: { fontSize: 15 },
   plus: { fontSize: 26, fontWeight: '300' },

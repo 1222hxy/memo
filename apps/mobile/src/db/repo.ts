@@ -7,7 +7,9 @@ import {
   newMemoryState,
   type Block,
   type Card,
+  type CardPlacement,
   type DeviceKind,
+  type Folder,
   type EventPayload,
   type MaskTarget,
   type Memory,
@@ -100,6 +102,29 @@ export async function recordEvent(db: SQLiteDatabase, payload: EventPayload, dev
 
 // ---------- 文件夹 ----------
 
+interface FolderRow {
+  id: string;
+  parent_id: string | null;
+  name: string;
+  sort_key: string;
+  created_at: number;
+  updated_at: number;
+  deleted_at: number | null;
+}
+
+const toFolder = (r: FolderRow): Folder => ({
+  id: r.id,
+  parentId: r.parent_id,
+  name: r.name,
+  sortKey: r.sort_key,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at,
+  deletedAt: r.deleted_at,
+});
+
+/** 新建项排在最后：按创建时间生成、可按字符串比较的排序键。 */
+const sortKeyNow = () => Date.now().toString(36).padStart(10, '0');
+
 /** 还没有文件夹时，建一个默认的。 */
 export async function ensureDefaultFolder(db: SQLiteDatabase): Promise<string> {
   const row = await db.getFirstAsync<{ id: string }>(
@@ -110,9 +135,143 @@ export async function ensureDefaultFolder(db: SQLiteDatabase): Promise<string> {
   const now = Date.now();
   await db.runAsync(
     'insert into folders (id, parent_id, name, sort_key, created_at, updated_at) values (?, null, ?, ?, ?, ?)',
-    [id, DEFAULT_FOLDER_NAME, 'a0', now, now],
+    [id, DEFAULT_FOLDER_NAME, sortKeyNow(), now, now],
   );
   return id;
+}
+
+export async function loadFolders(db: SQLiteDatabase): Promise<Folder[]> {
+  const rows = await db.getAllAsync<FolderRow>('select * from folders where deleted_at is null');
+  return rows.map(toFolder);
+}
+
+export async function createFolder(
+  db: SQLiteDatabase,
+  parentId: string | null,
+  name: string,
+  device: DeviceKind,
+): Promise<string> {
+  const id = newId();
+  const now = Date.now();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      'insert into folders (id, parent_id, name, sort_key, created_at, updated_at) values (?, ?, ?, ?, ?, ?)',
+      [id, parentId, name, sortKeyNow(), now, now],
+    );
+    await recordEvent(db, { type: 'folder_created', folderId: id, parentId }, device);
+  });
+  return id;
+}
+
+export async function renameFolder(db: SQLiteDatabase, id: string, name: string, device: DeviceKind): Promise<void> {
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('update folders set name = ?, updated_at = ? where id = ?', [name, Date.now(), id]);
+    await recordEvent(db, { type: 'folder_renamed', folderId: id }, device);
+  });
+}
+
+export async function moveFolder(
+  db: SQLiteDatabase,
+  id: string,
+  parentId: string | null,
+  device: DeviceKind,
+): Promise<void> {
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('update folders set parent_id = ?, sort_key = ?, updated_at = ? where id = ?', [
+      parentId,
+      sortKeyNow(),
+      Date.now(),
+      id,
+    ]);
+    await recordEvent(db, { type: 'folder_moved', folderId: id, parentId }, device);
+  });
+}
+
+/** 只能删除空文件夹（没有子文件夹、卡片和关联），避免误删内容。返回是否删除成功。 */
+export async function deleteFolder(db: SQLiteDatabase, id: string, device: DeviceKind): Promise<boolean> {
+  const row = await db.getFirstAsync<{ n: number }>(
+    `select (select count(*) from folders where parent_id = ? and deleted_at is null)
+          + (select count(*) from cards where folder_id = ? and deleted_at is null)
+          + (select count(*) from card_links l join cards c on c.id = l.card_id
+             where l.folder_id = ? and c.deleted_at is null) as n`,
+    [id, id, id],
+  );
+  if ((row?.n ?? 0) > 0) return false;
+  const now = Date.now();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('update folders set deleted_at = ?, updated_at = ? where id = ?', [now, now, id]);
+    await recordEvent(db, { type: 'folder_deleted', folderId: id }, device);
+  });
+  return true;
+}
+
+// ---------- 卡片的位置 ----------
+
+/** 所有未删除卡片的主位置和关联位置。 */
+export async function loadPlacements(db: SQLiteDatabase): Promise<CardPlacement[]> {
+  const cards = await db.getAllAsync<{ id: string; folder_id: string }>(
+    'select id, folder_id from cards where deleted_at is null',
+  );
+  const links = await db.getAllAsync<{ card_id: string; folder_id: string }>('select card_id, folder_id from card_links');
+  const linked = new Map<string, string[]>();
+  for (const l of links) linked.set(l.card_id, [...(linked.get(l.card_id) ?? []), l.folder_id]);
+  return cards.map((c) => ({ cardId: c.id, folderId: c.folder_id, linkedFolderIds: linked.get(c.id) ?? [] }));
+}
+
+export async function loadPlacement(db: SQLiteDatabase, cardId: string): Promise<CardPlacement | null> {
+  const card = await db.getFirstAsync<{ folder_id: string }>('select folder_id from cards where id = ?', [cardId]);
+  if (!card) return null;
+  const links = await db.getAllAsync<{ folder_id: string }>('select folder_id from card_links where card_id = ?', [
+    cardId,
+  ]);
+  return { cardId, folderId: card.folder_id, linkedFolderIds: links.map((l) => l.folder_id) };
+}
+
+/** 设置卡片的主位置和关联位置（关联里会自动去掉主位置）。 */
+export async function setPlacement(
+  db: SQLiteDatabase,
+  cardId: string,
+  folderId: string,
+  linkedFolderIds: readonly string[],
+  device: DeviceKind,
+): Promise<void> {
+  const links = [...new Set(linkedFolderIds)].filter((f) => f !== folderId);
+  const now = Date.now();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync('update cards set folder_id = ?, updated_at = ? where id = ?', [folderId, now, cardId]);
+    await db.runAsync('delete from card_links where card_id = ?', [cardId]);
+    for (const f of links) {
+      await db.runAsync('insert into card_links (id, card_id, folder_id, created_at) values (?, ?, ?, ?)', [
+        newId(),
+        cardId,
+        f,
+        now,
+      ]);
+    }
+    await recordEvent(db, { type: 'card_placed', cardId, folderId, linkedFolderIds: links }, device);
+  });
+}
+
+export interface CardSummary {
+  cardId: string;
+  /** 第一块内容的开头，用来在列表里认出这张卡。 */
+  preview: string;
+  /** true = 关联进来的，不是主位置。 */
+  linked: boolean;
+}
+
+/** 某个文件夹里直接放着的卡片（不含子文件夹），包括关联进来的。 */
+export async function listFolderCards(db: SQLiteDatabase, folderId: string): Promise<CardSummary[]> {
+  const rows = await db.getAllAsync<{ id: string; linked: number; preview: string | null }>(
+    `select c.id, case when c.folder_id = ? then 0 else 1 end as linked,
+            (select content from blocks b where b.card_id = c.id order by sort_key limit 1) as preview
+     from cards c
+     where c.deleted_at is null
+       and (c.folder_id = ? or exists (select 1 from card_links l where l.card_id = c.id and l.folder_id = ?))
+     order by c.created_at desc`,
+    [folderId, folderId, folderId],
+  );
+  return rows.map((r) => ({ cardId: r.id, preview: (r.preview ?? '').split('\n')[0]!, linked: r.linked === 1 }));
 }
 
 // ---------- 卡片 ----------

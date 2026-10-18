@@ -6,3 +6,4 @@ export * from './scheduler';
 export * from './selection';
 export * from './flow';
 export * from './events';
+export * from './folders';

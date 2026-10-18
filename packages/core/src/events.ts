@@ -118,7 +118,13 @@ export type EventPayload =
   | { type: 'card_deleted'; cardId: Id }
   | { type: 'memory_added'; memoryId: Id; cardId: Id }
   | { type: 'memory_removed'; memoryId: Id; cardId: Id }
-  | { type: 'settings_changed'; key: string; value: unknown };
+  | { type: 'settings_changed'; key: string; value: unknown }
+  | { type: 'folder_created'; folderId: Id; parentId: Id | null }
+  | { type: 'folder_renamed'; folderId: Id }
+  | { type: 'folder_moved'; folderId: Id; parentId: Id | null }
+  | { type: 'folder_deleted'; folderId: Id }
+  | { type: 'card_placed'; cardId: Id; folderId: Id; linkedFolderIds: Id[] }
+  | { type: 'scope_changed'; folderId: Id | null };
 
 export type MemoEvent = EventPayload & {
   id: Id;
